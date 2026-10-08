@@ -190,6 +190,15 @@ subroutine read_num_profiles(my_id)
     Phi_0 = num_Phi_y0(1)
     num_phi_y0 = num_phi_y0 - phi_1
   end if
+
+  ! time-dependent tauIC, read by all ranks (applied each time step in jorek2_main)
+  if ( tauIC_file /= 'none' ) then
+    call readProf(tauIC_times, tauIC_values, tauIC_file_len, tauIC_file)
+    if ( tauIC_file_len < 1 ) then
+      if ( my_id == 0 ) write(*,*) 'ERROR: could not read tauIC_file '//trim(tauIC_file)
+      stop
+    end if
+  end if
   
   contains
   

@@ -38,6 +38,9 @@ module phys_module
   real*8  :: Q_bar                !< (model400)
   real*8  :: sigma                !< (model400)
   real*8  :: tauIC                !< Scaling factor for diamagnetic terms (see [[diamag|diamagnetic]])
+  character(len=512) :: tauIC_file  !< ASCII file with (time, tauIC) pairs, linearly interpolated in time; 'none' keeps tauIC constant
+  real*8, allocatable :: tauIC_times(:), tauIC_values(:)  !< time points and tauIC values read from tauIC_file
+  integer :: tauIC_file_len         !< number of entries read from tauIC_file
   real*8  :: tauIC_nominal        !< Nominal scaling factor (considering Ti=Te) for diamagnetic terms (see [[diamag|diamagnetic]])
   real*8  :: eta_spitzer          !< Spitzer resistivity in the core (considering main ion charge Z=1, effective ion charge Zeff=1)
   real*8  :: lnA_center           !< Coulomb logarithm in the core (used for the resistivity function)

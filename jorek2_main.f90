@@ -26,6 +26,7 @@ program JOREK2
   use constants
   use data_structure
   use phys_module
+  use profiles, only: interpolProf
   use mod_parameters
   use mod_log_params
   use nodes_elements
@@ -681,9 +682,20 @@ write(*,*) "n elements:", element_list%n_elements
     
     tstep = tstep_n(jstep)
 
-    ! start from t=0 
+    ! start from t=0
     if (index_now <= 1) tstep_prev = tstep
-    
+
+    ! time-dependent tauIC from tauIC_file (piecewise linear, held constant outside the file range)
+    if ( tauIC_file /= 'none' ) then
+      if ( t_now <= tauIC_times(1) ) then
+        tauIC = tauIC_values(1)
+      else if ( t_now >= tauIC_times(tauIC_file_len) ) then
+        tauIC = tauIC_values(tauIC_file_len)
+      else
+        tauIC = interpolProf(tauIC_times, tauIC_values, tauIC_file_len, t_now)
+      end if
+    end if
+
     if ( my_id == 0 ) then
       write(*,*) '******************************************************'
       write(*,'(A17,3i7,2f14.5,A)') ' *   time step : ',jstep,istep,index_now,tstep,tstep_prev,'  *'

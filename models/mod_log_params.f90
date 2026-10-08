@@ -555,6 +555,7 @@ write(*,'(1x,a)',advance='no') ' USE_DOMM            : '
   write(*,REAL_FMT) 'particlesource_gauss_sig ', particlesource_gauss_sig
   write(*,REAL_FMT) 'gamma                 ', gamma
   write(*,REAL_FMT) 'tauIC                 ', tauIC
+  if (tauIC_file /= 'none') write(*,'(A,A)') 'tauIC_file            ', trim(tauIC_file)
   write(*,REAL_FMT) 'tauIC_nominal (not input parameter; printed for reference in JOREK units)', tauIC_nominal
   write(*,LOGI_FMT) 'Wdia                  ', Wdia
   write(*,REAL_FMT) 'eta_num               ', eta_num

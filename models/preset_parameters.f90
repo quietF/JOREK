@@ -508,6 +508,7 @@ subroutine preset_parameters
   U_sheath = .false.
   renormalise = .false.
   tauIC = 0.d0
+  tauIC_file = 'none'
   Wdia  = .false.
 
   zjz_0 =  0.1173d0   
