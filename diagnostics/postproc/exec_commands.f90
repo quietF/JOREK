@@ -158,6 +158,10 @@ module exec_commands
           call fluxsurfaces(command, ierr)
         case ( 'fluxsurface' )
           call fluxsurface(command, ierr)
+        case ( 'fluxsurfaces_wperturb' )
+          call fluxsurfaces_wperturb(command, ierr)
+        case ( 'fluxsurface_wperturb' )
+          call fluxsurface_wperturb(command, ierr)
         case ( 'for' )
           call loop_start(command, ierr)
         case ( 'four2d' )
@@ -248,7 +252,8 @@ module exec_commands
           'gourdon', 'jorek-units', 'jnorm_bnd_curr', 'si-units', 'grid', 'grid_diagnostics',      &
           'rectangle', 'rectangular_torus', 'energy_spectrum', 'average_h5', 'I_halo_TPF',         &
           'spi-state', 'shards', 'zeroD_quantities', 'boundary_quantities', 'find_q_surface',      &
-          'pol_contour_integrals', 'midplane2d', 'expressions_four', 'RHS_terms_vtk')
+          'pol_contour_integrals', 'midplane2d', 'expressions_four', 'RHS_terms_vtk',              &
+          'fluxsurfaces_wperturb', 'fluxsurface_wperturb')
           call add_to_command_queue(command, ierr)
         case ( 'help' )
           call help(command, ierr)
@@ -2948,6 +2953,7 @@ module exec_commands
     real*8                   :: psi_min, psi_max, psi_min2, psi_max2, ss1, dss1, ss2, dss2, tt1,   &
       dtt1, tt2, dtt2, u, si, dsi, ti, dti, R, R_s, R_t, R_st, R_ss, R_tt, Z, Z_s, Z_t, Z_st, Z_ss,&
       Z_tt
+    real*8                   :: radial_range(2)
     
     ierr = 0
     
@@ -2955,7 +2961,9 @@ module exec_commands
     call check_args(command%n_args,ierr,0);  if ( ierr /= 0 ) return
     call check_step_imported(ierr);          if ( ierr /= 0 ) return
     
-    npts  = get_int_setting('surfaces', ierr)
+    npts            = get_int_setting('surfaces', ierr)
+    radial_range(1) = get_float_setting('rad_range_min', ierr)
+    radial_range(2) = get_float_setting('rad_range_max', ierr)
     
     write(filename,'(4a)') trim(DIR), 'fluxsurfaces', trim(step_range_string(index_start,index_start)),  &
       '.dat'
@@ -2970,6 +2978,13 @@ module exec_commands
     end do
     psi_min = psi_min + 0.001*(psi_max-psi_min)
     psi_max = psi_max - 0.001*(psi_max-psi_min)
+    
+    if ( radial_range(1) .ne. 0.001 ) then
+      psi_min = ES%psi_axis + (ES%psi_bnd - ES%psi_axis) * radial_range(1)
+    endif
+    if ( radial_range(2) .ne. 0.999 ) then
+      psi_max = ES%psi_axis + (ES%psi_bnd - ES%psi_axis) * radial_range(2)
+    endif
     
     ! --- Find flux surfaces
     surface_list%n_psi = npts
@@ -3012,8 +3027,8 @@ module exec_commands
           call interp_RZ(node_list, element_list, i_elm, si, ti, R, R_s, R_t, R_st, R_ss, R_tt, &
             Z, Z_s, Z_t, Z_st, Z_ss, Z_tt)
             
-          ! --- Write out the (R,Z)-coordinates
-          write(i_file,'(2ES16.7)') R, Z
+          ! --- Write out the (R,Z)-coordinates and normalised psi
+          write(i_file,'(3ES16.7)') R, Z, (surface_list%psi_values(i) - ES%psi_axis)/(ES%psi_bnd - ES%psi_axis)
         end do
         
         write(i_file,*)
@@ -3028,9 +3043,274 @@ module exec_commands
     ! --- Clean up.
     if ( allocated(surface_list%psi_values)    ) deallocate(surface_list%psi_values)
     if ( allocated(surface_list%flux_surfaces) ) deallocate(surface_list%flux_surfaces)
-    
+
   end subroutine fluxsurfaces
-  
+
+
+
+  !> Output flux surfaces in [rad_range_min, rad_range_max] with non-axisymmetric perturbations.
+  recursive subroutine fluxsurfaces_wperturb(command, ierr)
+
+    ! --- Routine parameters
+    type(type_command), intent(in)  :: command     !< Command to be executed
+    integer,            intent(out) :: ierr        !< Error flag
+
+    ! --- Local variables
+    integer                  :: i, i_elm, npts
+    type (type_surface_list) :: surface_list
+    character(len=1024)      :: filename
+    real*8                   :: psi_min, psi_max, psi_min2, psi_max2
+    real*8                   :: radial_range(2)
+
+    ierr = 0
+
+    ! --- Some checks
+    call check_args(command%n_args,ierr,0);  if ( ierr /= 0 ) return
+    call check_step_imported(ierr);          if ( ierr /= 0 ) return
+
+    npts            = get_int_setting('surfaces', ierr)
+    radial_range(1) = get_float_setting('rad_range_min', ierr)
+    radial_range(2) = get_float_setting('rad_range_max', ierr)
+
+    write(filename,'(4a)') trim(DIR), 'fluxsurfaces_wperturb',                                       &
+      trim(step_range_string(index_start,index_start)), '.dat'
+
+    ! --- Find minimum and maximum psi values
+    psi_min=+1.d99
+    psi_max=-1.d99
+    do i_elm = 1, element_list%n_elements
+      call psi_minmax(node_list, element_list, i_elm, psi_min2, psi_max2)
+      psi_min = min(psi_min,psi_min2)
+      psi_max = max(psi_max,psi_max2)
+    end do
+    psi_min = psi_min + 0.001*(psi_max-psi_min)
+    psi_max = psi_max - 0.001*(psi_max-psi_min)
+
+    if ( radial_range(1) .ne. 0.001 ) then
+      psi_min = ES%psi_axis + (ES%psi_bnd - ES%psi_axis) * radial_range(1)
+    endif
+    if ( radial_range(2) .ne. 0.999 ) then
+      psi_max = ES%psi_axis + (ES%psi_bnd - ES%psi_axis) * radial_range(2)
+    endif
+
+    ! --- Find flux surfaces
+    surface_list%n_psi = npts
+    allocate( surface_list%psi_values(npts) )
+    do i = 1, npts
+      surface_list%psi_values(i) = psi_min + (psi_max-psi_min) * real(i-1)/real(npts-1)
+    end do
+    call find_flux_surfaces(0,xpoint, xcase, node_list, element_list, surface_list)
+
+    call write_fluxsurfaces_wperturb(surface_list, filename, ierr)
+
+    ! --- Clean up.
+    if ( allocated(surface_list%psi_values)    ) deallocate(surface_list%psi_values)
+    if ( allocated(surface_list%flux_surfaces) ) deallocate(surface_list%flux_surfaces)
+
+  end subroutine fluxsurfaces_wperturb
+
+
+
+  !> Output a single flux surface at a given normalised psi with non-axisymmetric perturbations.
+  subroutine fluxsurface_wperturb(command, ierr)
+
+    ! --- Routine parameters
+    type(type_command), intent(in)  :: command     !< Command to be executed
+    integer,            intent(out) :: ierr        !< Error flag
+
+    ! --- Local variables
+    type (type_surface_list) :: surface_list
+    character(len=1024)      :: filename
+    real*8                   :: target_psi
+
+    ierr = 0
+
+    ! --- Some checks
+    call check_args(command%n_args,ierr,1);  if ( ierr /= 0 ) return
+    call check_step_imported(ierr);          if ( ierr /= 0 ) return
+
+    target_psi = to_float(command%args(1), ierr); if ( ierr /= 0 ) return
+
+    if (target_psi < 0.0 .or. target_psi > 1.0) then
+      write(*,*) 'fluxsurface_wperturb target psi must be a valid normalised psi.'
+      ierr = 1
+      return
+    endif
+
+    write(filename,'(5a)') trim(DIR), 'fluxsurface_wperturb_at_psi_', trim(real2str(target_psi)),   &
+      trim(step_range_string(index_start,index_start)), '.dat'
+
+    ! --- Find flux surface
+    surface_list%n_psi = 1
+    allocate( surface_list%psi_values(1) )
+    surface_list%psi_values(1) = ES%psi_axis + target_psi * (ES%psi_bnd - ES%psi_axis)
+    call find_flux_surfaces(0,xpoint, xcase, node_list, element_list, surface_list)
+
+    call write_fluxsurfaces_wperturb(surface_list, filename, ierr)
+
+    ! --- Clean up.
+    if ( allocated(surface_list%psi_values)    ) deallocate(surface_list%psi_values)
+    if ( allocated(surface_list%flux_surfaces) ) deallocate(surface_list%flux_surfaces)
+
+  end subroutine fluxsurface_wperturb
+
+
+
+  !> Write the points of the given flux surfaces together with the n/=0 perturbations of
+  !! Psi, u, zj, rho, T at phi=0 and the poloidal velocities from the n=0 part.
+  !!
+  !! Columns: R, Z, psi_N, dPsi, du, dzj, drho, dT, V_ExB, Vstar_i, Vtheta_i
+  subroutine write_fluxsurfaces_wperturb(surface_list, filename, ierr)
+
+    ! --- Routine parameters
+    type (type_surface_list), intent(in)  :: surface_list
+    character(len=*),         intent(in)  :: filename
+    integer,                  intent(out) :: ierr
+
+    ! --- Local variables
+    integer                  :: i, j, i_elm, ip, nplot, i_file, i_tor
+    integer, parameter       :: i_plane = 1
+    real*8                   :: ss1, dss1, ss2, dss2, tt1, dtt1, tt2, dtt2, u, si, dsi, ti, dti,     &
+      R, R_s, R_t, R_st, R_ss, R_tt, Z, Z_s, Z_t, Z_st, Z_ss, Z_tt
+    real*8                   :: Ps0, Ps0_s, Ps0_t, Ps0_x, Ps0_y
+    real*8                   :: U0,  U0_s,  U0_t,  U0_x,  U0_y
+    real*8                   :: ZN0, ZN0_s, ZN0_t, ZN0_x, ZN0_y
+    real*8                   :: T0,  T0_s,  T0_t,  T0_x,  T0_y
+    real*8                   :: Ti0, Ti0_s, Ti0_t, Te0, Te0_s, Te0_t
+    real*8                   :: V0,  V0_s,  V0_t
+    real*8                   :: val, val_s, val_t, val2, val2_s, val2_t
+    real*8                   :: Psi_sum, U_sum, zj_sum, rho_sum, T_sum
+    real*8                   :: xjac, psi_norm, psi_abs, Btheta, Er, V_ExB, Vstar_i, Vtheta_i
+
+    ierr = 0
+
+    nplot  = 5
+    i_file = 111
+    call open_ascii_file(ierr, i_file, filename, .false.)
+
+    do i = 1, surface_list%n_psi
+
+      ! --- Loop over all segments of this flux surface
+      do j=1,surface_list%flux_surfaces(i)%n_pieces
+
+        ! --- Bezier element, in which the current flux surface segment is located
+        i_elm = surface_list%flux_surfaces(i)%elm(j)
+        ss1  = surface_list%flux_surfaces(i)%s(1,j)
+        dss1 = surface_list%flux_surfaces(i)%s(2,j)
+        ss2  = surface_list%flux_surfaces(i)%s(3,j)
+        dss2 = surface_list%flux_surfaces(i)%s(4,j)
+
+        tt1  = surface_list%flux_surfaces(i)%t(1,j)
+        dtt1 = surface_list%flux_surfaces(i)%t(2,j)
+        tt2  = surface_list%flux_surfaces(i)%t(3,j)
+        dtt2 = surface_list%flux_surfaces(i)%t(4,j)
+
+        ! --- Loop over nplot points in a flux surface segment
+        do ip = 1, nplot
+          u = -1. + 2.*float(ip-1)/float(nplot-1)
+
+          ! --- Determine s and t values of the current point inside element i_elm
+          call CUB1D(ss1, dss1, ss2, dss2, u, si, dsi)
+          call CUB1D(tt1, dtt1, tt2, dtt2, u, ti, dti)
+
+          ! --- Determine (R,Z)-coordinates of the current point on the current flux surface
+          call interp_RZ(node_list, element_list, i_elm, si, ti, R, R_s, R_t, R_st, R_ss, R_tt, &
+            Z, Z_s, Z_t, Z_st, Z_ss, Z_tt)
+
+          psi_norm = get_psi_n( surface_list%psi_values(i), Z )
+          xjac     = R_s * Z_t - R_t * Z_s
+
+          ! --- Axisymmetric (n=0) part
+          call interp(node_list, element_list, i_elm, var_psi, 1, si, ti, Ps0, Ps0_s, Ps0_t)
+          call interp(node_list, element_list, i_elm, var_u,   1, si, ti, U0,  U0_s,  U0_t)
+          if ( var_rho > 0 ) then
+            call interp(node_list, element_list, i_elm, var_rho, 1, si, ti, ZN0, ZN0_s, ZN0_t)
+          else
+            ZN0 = 1.d0; ZN0_s = 0.d0; ZN0_t = 0.d0
+          end if
+          if ( with_Vpar ) then
+            call interp(node_list, element_list, i_elm, var_Vpar, 1, si, ti, V0, V0_s, V0_t)
+          else
+            V0 = 0.d0
+          end if
+          if ( with_TiTe ) then
+            call interp(node_list, element_list, i_elm, var_Ti, 1, si, ti, Ti0, Ti0_s, Ti0_t)
+            call interp(node_list, element_list, i_elm, var_Te, 1, si, ti, Te0, Te0_s, Te0_t)
+            T0   = Ti0   + Te0
+            T0_s = Ti0_s + Te0_s
+            T0_t = Ti0_t + Te0_t
+          else
+            call interp(node_list, element_list, i_elm, var_T,  1, si, ti, T0,  T0_s,  T0_t)
+          end if
+
+          Ps0_x = (   Z_t * Ps0_s - Z_s * Ps0_t ) / xjac
+          Ps0_y = ( - R_t * Ps0_s + R_s * Ps0_t ) / xjac
+          U0_x  = (   Z_t * U0_s  - Z_s * U0_t  ) / xjac
+          U0_y  = ( - R_t * U0_s  + R_s * U0_t  ) / xjac
+          ZN0_x = (   Z_t * ZN0_s - Z_s * ZN0_t ) / xjac
+          ZN0_y = ( - R_t * ZN0_s + R_s * ZN0_t ) / xjac
+          T0_x  = (   Z_t * T0_s  - Z_s * T0_t  ) / xjac
+          T0_y  = ( - R_t * T0_s  + R_s * T0_t  ) / xjac
+
+          ! --- Non-axisymmetric (n/=0) perturbations at toroidal plane i_plane
+          Psi_sum = 0.d0
+          U_sum   = 0.d0
+          zj_sum  = 0.d0
+          rho_sum = 0.d0
+          T_sum   = 0.d0
+          do i_tor = 2, n_tor
+            call interp(node_list, element_list, i_elm, var_psi, i_tor, si, ti, val, val_s, val_t)
+            Psi_sum = Psi_sum + val * HZ(i_tor,i_plane)
+            call interp(node_list, element_list, i_elm, var_u,   i_tor, si, ti, val, val_s, val_t)
+            U_sum   = U_sum   + val * HZ(i_tor,i_plane)
+            if ( var_zj > 0 ) then
+              call interp(node_list, element_list, i_elm, var_zj,  i_tor, si, ti, val, val_s, val_t)
+              zj_sum  = zj_sum  + val * HZ(i_tor,i_plane)
+            end if
+            if ( var_rho > 0 ) then
+              call interp(node_list, element_list, i_elm, var_rho, i_tor, si, ti, val, val_s, val_t)
+              rho_sum = rho_sum + val * HZ(i_tor,i_plane)
+            end if
+            if ( with_TiTe ) then
+              call interp(node_list, element_list, i_elm, var_Ti, i_tor, si, ti, val,  val_s,  val_t)
+              call interp(node_list, element_list, i_elm, var_Te, i_tor, si, ti, val2, val2_s, val2_t)
+              val = val + val2
+            else
+              call interp(node_list, element_list, i_elm, var_T,  i_tor, si, ti, val, val_s, val_t)
+            end if
+            T_sum   = T_sum   + val * HZ(i_tor,i_plane)
+          end do
+
+          ! --- Poloidal velocities from the n=0 part
+          psi_abs  = sqrt(Ps0_x*Ps0_x + Ps0_y*Ps0_y)
+          Btheta   = psi_abs/R
+          Er       = 0.d0
+          V_ExB    = 0.d0
+          Vstar_i  = 0.d0
+          Vtheta_i = 0.d0
+          if ( (psi_abs .gt. 1.d-6) .and. (abs(Btheta) .gt. 1.d-6) ) then
+            Er       = -(U0_x * Ps0_x + U0_y * Ps0_y)/psi_abs         ! radial electric field
+            V_ExB    = -(U0_x * Ps0_x + U0_y * Ps0_y)/Btheta
+            Vstar_i  = - 1./Btheta * tauIC/ZN0 * ( (T0_x*ZN0 + ZN0_x*T0) * Ps0_x                     &
+                                                 + (T0_y*ZN0 + ZN0_y*T0) * Ps0_y )
+            Vtheta_i = V_ExB + V0*Btheta + Vstar_i
+          end if
+
+          write(i_file,'(11ES16.7)') R, Z, psi_norm, Psi_sum, U_sum, zj_sum, rho_sum, T_sum,         &
+            V_ExB, Vstar_i, Vtheta_i
+        end do
+
+        write(i_file,*)
+        write(i_file,*)
+
+      end do
+
+    end do
+
+    close(i_file)
+
+  end subroutine write_fluxsurfaces_wperturb
+
 
   !> Output the flux surface.
   subroutine fluxsurface(command, ierr)
