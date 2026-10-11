@@ -32,7 +32,8 @@ character*8, allocatable :: scalar_names(:), vector_names(:)
 real*4                :: float
 real*8                :: sg, tg, phi, angle
 real*8,allocatable    :: avg6(:), avg7(:), avg8(:), avg11(:), Ravg(:), Zavg(:)
-real*8,allocatable    :: prf1(:), prf2(:), prf3(:), prf4(:), prf5(:), prf6(:), prf7(:), prf8(:), prf11(:), Rprf(:), Zprf(:)
+real*8,allocatable    :: prf1(:,:), prf2(:,:), prf3(:,:), prf4(:,:), prf5(:,:), prf6(:,:), prf7(:,:), prf8(:,:), prf11(:,:)
+real*8,allocatable    :: angleprf(:), Rprf(:), Zprf(:)
 logical,allocatable   :: tobedone(:)
 real*8                :: BigR, xjac, psi_norm
 real*8                :: R,R_s,R_t,R_st,R_ss,R_tt, Z,Z_s,Z_t,Z_st,Z_ss,Z_tt
@@ -40,7 +41,7 @@ real*8                :: PS,PS_s,PS_t,PS_st,PS_ss,PS_tt, VP,VP_s,VP_t,VP_st,VP_s
 real*8                :: RH,RH_s,RH_t,RH_st,RH_ss,RH_tt, TT,TT_s,TT_t,TT_st,TT_ss,TT_tt
 real*8                :: rho, rho_s, rho_t, T, T_s, T_t, T_p, vpar, D_prof, ZK_prof, ZKpar_T
 real*8                :: psi, psi_s, psi_t, psi_x, psi_y, T_x, T_y, BB2, normal, rho_norm, t_norm
-real*8                :: distance, R_start, Z_start
+real*8                :: distance, R_start, Z_start, R_start_orig, Z_start_orig
 logical               :: periodic
 logical               :: without_n0_mode
 integer               :: i_bnd_node, i_node
@@ -117,6 +118,8 @@ do i_bnd_node = 1, bnd_node_list%n_bnd_nodes
   end if
 end do
 write(*,*) R_start, Z_start
+R_start_orig = R_start
+Z_start_orig = Z_start
 
 n_bnd = 0
 do i=1,element_list%n_elements  
@@ -176,10 +179,10 @@ n_points = nsub*n_bnd       ! number of points in one poloidal plane
 allocate(avg6(n_points),avg7(n_points),avg8(n_points),avg11(n_points),Ravg(n_points),Zavg(n_points))
 avg6 = 0.d0; avg7 = 0.d0; avg8 = 0.d0; avg11 = 0.d0; Ravg = 0.d0; Zavg = 0.d0
 
-allocate(prf1(n_points),prf2(n_points),prf3(n_points),prf4(n_points),prf5(n_points),Rprf(n_points),Zprf(n_points))
-prf2 = 0.d0; prf3 = 0.d0; prf4 = 0.d0; prf5 = 0.d0; Rprf = 0.d0; Zprf = 0.d0
-allocate(prf6(n_points),prf7(n_points),prf8(n_points),prf11(n_points))
-prf6 = 0.d0; prf7 = 0.d0; prf8 = 0.d0; prf11 = 0.d0
+allocate(prf1(n_points,n_plane),prf2(n_points,n_plane),prf3(n_points,n_plane),prf4(n_points,n_plane),prf5(n_points,n_plane))
+allocate(prf6(n_points,n_plane),prf7(n_points,n_plane),prf8(n_points,n_plane),prf11(n_points,n_plane))
+allocate(angleprf(n_plane),Rprf(n_points),Zprf(n_points))
+prf2 = 0.d0; prf3 = 0.d0; prf4 = 0.d0; prf5 = 0.d0; Rprf = 0.d0; Zprf = 0.d0; angleprf = 0.d0
 
 do i_tor=1, n_tor
   write(*,*) ' toroidal mode numbers : ',i_tor,mode(i_tor)
@@ -462,15 +465,16 @@ do m=1, n_plane
           if (m.eq.1) then
             Rprf(inode_avg)  = R
             Zprf(inode_avg)  = Z
-	    prf1(inode_avg)  = scalars(inode,1)
-            prf7(inode_avg)  = scalars(inode,7) / MU_zero / t_norm * 1.5
-            prf6(inode_avg)  = scalars(inode,6) / MU_zero / t_norm * 1.5
-            prf2(inode_avg)  = scalars(inode,2) * central_density
-            prf3(inode_avg)  = scalars(inode,3) / MU_zero / (central_density * 1d20) / 1.602d-19 /2.
-            prf4(inode_avg)  = scalars(inode,4) / t_norm
-            prf5(inode_avg)  = scalars(inode,5) * central_density / t_norm
-            prf11(inode_avg) = scalars(inode,11) / MU_zero / t_norm
           endif
+          angleprf(m) = angle
+          prf1(inode_avg,m)  = scalars(inode,1)
+          prf7(inode_avg,m)  = scalars(inode,7) / MU_zero / t_norm * 1.5
+          prf6(inode_avg,m)  = scalars(inode,6) / MU_zero / t_norm * 1.5
+          prf2(inode_avg,m)  = scalars(inode,2) * central_density
+          prf3(inode_avg,m)  = scalars(inode,3) / MU_zero / (central_density * 1d20) / 1.602d-19 /2.
+          prf4(inode_avg,m)  = scalars(inode,4) / t_norm
+          prf5(inode_avg,m)  = scalars(inode,5) * central_density / t_norm
+          prf11(inode_avg,m) = scalars(inode,11) / MU_zero / t_norm
 
         enddo
 
@@ -533,31 +537,40 @@ avg11(:)= avg11(:) / MU_zero / t_norm / float(n_plane)
 
 
 open(22,file='target_profile')
-write(22,'(A132)') "  Length          R               Z               angle           KparT_normal    gam_nVT_normal  density         T              Vpar            nv_normal       gam_nvT"
+write(22,'(A170)') "  Length          R               Z               angle           KparT_normal    gam_nVT_normal  density         T              Vpar            nv_normal       gam_nvT"
 
 open(23,file='average_target_profile')
-write(23,'(A132)') '      time         step            Length         R               Z              nTV.n           KparT.n        Kperp.T        nvT_gam'
+write(23,'(A135)') '      time         step            Length         R               Z              nTV.n           KparT.n        Kperp.T        nvT_gam'
 
 allocate(tobedone(n_points))
 
-tobedone = .true.
-distance = 0.d0
+do m=1, n_plane
 
-do i=1, n_points
+  tobedone = .true.
+  distance = 0.d0
+  R_start = R_start_orig
+  Z_start = Z_start_orig
 
-  index = minval(minloc((Rprf-R_start)**2+(Zprf-Z_start)**2,tobedone))
+  do i=1, n_points
+    index = minval(minloc((Rprf-R_start)**2+(Zprf-Z_start)**2,tobedone))
+    distance = distance + sqrt((Rprf(index)-R_start)**2+(Zprf(index)-Z_start)**2)
 
-  distance = distance + sqrt((Rprf(index)-R_start)**2+(Zprf(index)-Z_start)**2)
+    R_start = Rprf(index)
+    Z_start = Zprf(index)
+    tobedone(index) = .false.
 
-  R_start = Rprf(index)
-  Z_start = Zprf(index)
-  tobedone(index) = .false.
+    if (m .eq. 1) then
+      write(23,'(12e16.8)') xtime(index_start),xtime(index_start)-xtime(index_start-10), distance, &
+                            Ravg(index),Zavg(index),avg6(index),avg7(index),avg8(index),avg11(index),normal
+    endif
 
-  write(22,'(12e16.8)') distance, Rprf(index),Zprf(index),angle,prf7(index),prf6(index), &
-                        prf2(index), prf3(index),  prf4(index), prf5(index), prf11(index) 
+    write(22,'(12e16.8)') distance, Rprf(index), Zprf(index), angleprf(m), prf7(index,m), prf6(index,m), &
+                          prf2(index,m), prf3(index,m), prf4(index,m), prf5(index,m), prf11(index,m)
 
-  write(23,'(12e16.8)') xtime(index_start),xtime(index_start)-xtime(index_start-10), distance, &
-                        Ravg(index),Zavg(index),avg6(index),avg7(index),avg8(index),avg11(index),normal
+  enddo
+
+  write(22,*)
+  write(22,*)
 enddo
 
 close(23)
