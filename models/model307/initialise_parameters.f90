@@ -115,6 +115,7 @@ namelist /in1/  tstep, nstep, tstep_n, nstep_n,                     &
                 time_evol_scheme, corr_neg_temp_coef,               &
                 corr_neg_dens_coef, D_prof_neg, ZK_prof_neg,        &
                 D_prof_neg_thresh, ZK_prof_neg_thresh, T_min,rho_min,&
+                use_zkperp_times_density, zkperp_density_floor,     &
                 T_min_neg, rho_min_neg, implicit_heat_source,       &
                 Number_RMP_harmonics,RMP_har_cos_spectrum,          &
                 RMP_har_sin_spectrum,                               &
