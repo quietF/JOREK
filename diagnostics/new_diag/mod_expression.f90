@@ -184,6 +184,12 @@ module mod_expression
     call add(exprs_all, 'A_Z         ', 'Vertical Component of Magnetic Vector Potential       ')
     call add(exprs_all, 'A_3         ', 'Tor. Comp. of Magn. Vect. Pot. Multipled by R (==Psi) ')
     call add(exprs_all, 'Er          ', 'Radial Electric Field                                 ')
+    call add(exprs_all, 'qr_cd_perp  ', 'Perp. conductive heat flux through n=0 flux surfaces  ')
+    call add(exprs_all, 'qr_cd_flut  ', 'Par. conductive heat flux along dB through n=0 surf.  ')
+    call add(exprs_all, 'qr_cv_ExB   ', 'ExB convective heat flux through n=0 flux surfaces    ')
+    call add(exprs_all, 'qr_cv_flut  ', 'Par. convective heat flux along dB through n=0 surf.  ')
+    call add(exprs_all, 'PsiN_n0     ', 'Normalized poloidal flux of the n=0 component         ')
+    call add(exprs_all, 'gradPsiN_n0 ', '|grad Psi_N| of the n=0 component [1/m]               ')
     call add(exprs_all, 'Vtheta_i    ', 'Ion Poloidal Velocity                                 ')
     call add(exprs_all, 'Mach_par    ', 'Parallel Mach Number                                  ')
     call add(exprs_all, 'Mach_pol    ', 'Poloidal Mach Number                                  ')
@@ -599,6 +605,8 @@ module mod_expression
       AR0_ss, AR0_tt, AR0_st, AR0_pp, AZ0, AZ0_p, AZ0_s, AZ0_t, AZ0_sp, AZ0_tp, AZ0_ss, AZ0_tt,    &
       AZ0_st, AZ0_pp, A30, A30_p, A30_s, A30_t, A30_ss, A30_tt, A30_st, A30_sp, A30_tp, A30_pp,    &
       Fprofile, Fprofile_s, Fprofile_t, Fprofile_R, Fprofile_Z
+    real*8  :: ps00, ps00_s, ps00_t, ps00_R, ps00_Z, psi00_abs, n00R, n00Z, b_n00, psiN_n0, gradpsiN_n0
+    real*8  :: qr_cd_perp, qr_cd_flut, qr_cv_ExB, qr_cv_flut
     real*8  :: ps0_R, ps0_Z, ps0_RR, ps0_ZZ, ps0_RZ, u0_R, u0_Z, u0_RR, u0_ZZ, u0_RZ, vv2, zj0_R,  &
       zj0_Z, zj0_RR, zj0_ZZ, zj0_RZ, w0_R, w0_Z, w0_RR, w0_ZZ, w0_RZ, r0_R, r0_Z, r0_RR, r0_ZZ,    &
       r0_RZ, r0_hat, r0_R_hat, r0_Z_hat, T0_R, T0_Z, T0_RR, T0_ZZ, T0_RZ, T0_ps0_R, T0_ps0_Z,      &
@@ -800,6 +808,7 @@ module mod_expression
           x_cart = + R*cos(phi)
           y_cart = - R*sin(phi)
           
+          ps00  = 0.d0; ps00_s  = 0.d0; ps00_t  = 0.d0
           ps0   = 0.d0; ps0_s   = 0.d0; ps0_t   = 0.d0; ps0_ss   = 0.d0; ps0_tt   = 0.d0; ps0_st   = 0.d0; ps0_p   = 0.d0; ps0_pp   = 0.d0
           u0    = 0.d0; u0_s    = 0.d0; u0_t    = 0.d0; u0_ss    = 0.d0; u0_tt    = 0.d0; u0_st    = 0.d0; u0_p    = 0.d0; u0_pp    = 0.d0
           zj0   = 0.d0; zj0_s   = 0.d0; zj0_t   = 0.d0; zj0_ss   = 0.d0; zj0_tt   = 0.d0; zj0_st   = 0.d0; zj0_p   = 0.d0; zj0_pp   = 0.d0
@@ -866,6 +875,11 @@ module mod_expression
                 ps0      = ps0      + vv(var_psi) * sz * hh    * hhz
                 ps0_s    = ps0_s    + vv(var_psi) * sz * hh_s  * hhz
                 ps0_t    = ps0_t    + vv(var_psi) * sz * hh_t  * hhz
+                if (i_tor == 1) then                                       ! n=0 harmonic
+                  ps00   = ps00   + vv(var_psi) * sz * hh    * hhz
+                  ps00_s = ps00_s + vv(var_psi) * sz * hh_s  * hhz
+                  ps00_t = ps00_t + vv(var_psi) * sz * hh_t  * hhz
+                end if
                 ps0_ss   = ps0_ss   + vv(var_psi) * sz * hh_ss * hhz
                 ps0_tt   = ps0_tt   + vv(var_psi) * sz * hh_tt * hhz
                 ps0_st   = ps0_st   + vv(var_psi) * sz * hh_st * hhz
@@ -1039,6 +1053,8 @@ module mod_expression
           ! --- Construct Cartesian Derivatives of Variables.
           ps0_R    = (   Z_t * ps0_s - Z_s * ps0_t ) / xjac
           ps0_Z    = ( - R_t * ps0_s + R_s * ps0_t ) / xjac
+          ps00_R   = (   Z_t * ps00_s - Z_s * ps00_t ) / xjac
+          ps00_Z   = ( - R_t * ps00_s + R_s * ps00_t ) / xjac
           ps0_RR   = (ps0_ss * Z_t**2 - 2.d0*ps0_st * Z_s*Z_t + ps0_tt * Z_s**2  &
                       + ps0_s * (Z_st*Z_t - Z_tt*Z_s )                           &
                       + ps0_t * (Z_st*Z_s - Z_ss*Z_t ) )       / xjac**2         &
@@ -1458,6 +1474,29 @@ module mod_expression
     
           partF_cnv_par_norm =   r0 * Vpar_tot * Bnorm / Btot                           !  p v_par·n
           partF_cnv_tot_norm =   r0 * ( VR * nmlR + VZ * nmlZ )                         !  n v·n
+
+          ! --- Heat flux through the n=0 flux surfaces (unit normal grad(psi_00)/|grad(psi_00)|, positive outward)
+          psi00_abs = sqrt(ps00_R**2 + ps00_Z**2)
+          psiN_n0   = get_psi_n(ps00, Z)
+          n00R = 0.d0; n00Z = 0.d0; gradpsiN_n0 = 0.d0
+          if ( (psi00_abs > 1.d-12) .and. (abs(eq%psi_bnd - eq%psi_axis) > 1.d-12) ) then
+            n00R        = ps00_R / psi00_abs * sign(1.d0, eq%psi_bnd - eq%psi_axis)
+            n00Z        = ps00_Z / psi00_abs * sign(1.d0, eq%psi_bnd - eq%psi_axis)
+            gradpsiN_n0 = psi00_abs / abs(eq%psi_bnd - eq%psi_axis)
+          end if
+          b_n00 = (BR*n00R + BZ*n00Z) / Btot                                            ! b·n, nonzero only through dB
+          if ( with_TiTe ) then
+            qr_cd_perp = - ZKi_prof*(Ti0_R*n00R + Ti0_Z*n00Z)                                  / (gamma-1.d0) &
+                         + ZKi_prof*(BR*Ti0_R + BZ*Ti0_Z + Btor*Ti0_p/R) * Btot*b_n00 / BB2 / (gamma-1.d0) &
+                         - ZKe_prof*(Te0_R*n00R + Te0_Z*n00Z)                                  / (gamma-1.d0) &
+                         + ZKe_prof*(BR*Te0_R + BZ*Te0_Z + Btor*Te0_p/R) * Btot*b_n00 / BB2 / (gamma-1.d0)
+          else
+            qr_cd_perp = - ZK_prof *(T0_R*n00R + T0_Z*n00Z)                                    / (gamma-1.d0) &
+                         + ZK_prof *(BR*T0_R + BZ*T0_Z + Btor*T0_p/R)    * Btot*b_n00 / BB2 / (gamma-1.d0)
+          end if
+          qr_cd_flut = ZKpar_flux    * b_n00                                            ! q_par b·n
+          qr_cv_ExB  = gamma/(gamma-1.d0) * r0 * T0 * R * (- u0_Z*n00R + u0_R*n00Z)    ! gamma/(gamma-1) p v_E·n
+          qr_cv_flut = pres_flux_par * b_n00                                            ! gamma/(gamma-1) p v_par b·n
     
 #if (defined WITH_Neutrals) && (!defined WITH_Impurities)
           neut_part_flux_norm= -D_neutral_x*rn0_R * nmlR - D_neutral_y * rn0_Z * nmlZ
@@ -2067,6 +2106,24 @@ module mod_expression
 
               case ( 'heatF_prp_cv' )
                 res = (pres_flux_tot_norm-pres_flux_par_norm) * fact_flux
+
+              case ( 'qr_cd_perp' )
+                res = qr_cd_perp * fact_flux
+
+              case ( 'qr_cd_flut' )
+                res = qr_cd_flut * fact_flux
+
+              case ( 'qr_cv_ExB' )
+                res = qr_cv_ExB * fact_flux
+
+              case ( 'qr_cv_flut' )
+                res = qr_cv_flut * fact_flux
+
+              case ( 'PsiN_n0' )
+                res = psiN_n0
+
+              case ( 'gradPsiN_n0' )
+                res = gradpsiN_n0
 
               case ( 'heatF_tot_cv' )
                 res = pres_flux_tot_norm * fact_flux
