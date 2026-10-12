@@ -55,7 +55,19 @@ class(*), pointer :: p
 real*8    :: tstep
 integer*4 :: norb, ndata, nprt, finished
 integer*4 :: ifail, iprt
-real*8    :: zprev, phiprev, raxis, zaxis, xyz(3), xyz0(3)
+real*8    :: zprev, phiprev, raxis, zaxis, xyz(3), xyz0(3), n_e_dum
+
+! Running file with the R,Z and temperatures of every marker crossing the phi=0 plane
+integer*4 :: phi0unit                   !< Unit of the phi=0 crossing file
+real*8, dimension(:), allocatable :: T_init   !< Electron temperature [K] at the initial location of each marker
+real*8, dimension(:), allocatable :: psi_init !< Normalized psi at the initial location of each marker
+
+! phi=0 crossings, kept in growing arrays (never overwritten) so the h5 file matches poincare_phi0.dat
+integer*4 :: n_phi0                               !< Number of phi=0 crossings recorded so far
+integer*4, dimension(:), allocatable :: phi0_id   !< Marker index of each phi=0 crossing
+real*8, dimension(:), allocatable    :: phi0_r    !< R [m] of each phi=0 crossing
+real*8, dimension(:), allocatable    :: phi0_z    !< Z [m] of each phi=0 crossing
+real*8, dimension(:), allocatable    :: phi0_Tnow !< Electron temperature [eV] at each phi=0 crossing
 real*8    :: taxis, saxis, psiaxis, ielmaxis
 real*8    :: mass, pitch, energy
 integer*4 :: charge
@@ -105,7 +117,9 @@ end if
 ! Allocate and initialize needed data arrays
 allocate ( rvals(nprt,ndata), zvals(nprt,ndata), phivals(nprt,ndata), psivals(nprt,ndata), &
      milvals(nprt, ndata), pncrid(nprt,ndata) )
-allocate ( nextslot(nprt), ncross(nprt), mileage(nprt) )
+allocate ( nextslot(nprt), ncross(nprt), mileage(nprt), T_init(nprt), psi_init(nprt) )
+n_phi0 = 0
+allocate ( phi0_id(1000), phi0_r(1000), phi0_z(1000), phi0_Tnow(1000) )
 
 call cpu_time(t0)
 
@@ -123,6 +137,20 @@ call find_axis(sim%my_id, sim%fields%node_list, sim%fields%element_list, &
 call init_markers(sim, nprt, raxis, zaxis, mass, charge, pitch, energy)
 write(*,*) "Markers initialized. Begin simulation."
 
+! Electron temperature [K] and normalized psi at the initial location of each marker
+do iprt=1,nprt
+   T_init(iprt)   = 0.d0
+   psi_init(iprt) = 0.d0
+   if (sim%groups(1)%particles(iprt)%i_elm .gt. 0) then
+      call sim%fields%calc_NeTeTi(sim%time, sim%groups(1)%particles(iprt)%i_elm, &
+           sim%groups(1)%particles(iprt)%st, sim%groups(1)%particles(iprt)%x(3), &
+           n_e_dum, T_init(iprt))
+      call get_psi_n0(sim%fields, sim%groups(1)%particles(iprt)%i_elm, &
+           sim%groups(1)%particles(iprt)%st(1), sim%groups(1)%particles(iprt)%st(2), &
+           sim%groups(1)%particles(iprt)%x(2), psi_init(iprt))
+   end if
+end do
+
 ! Init data arrays
 rvals    = 0
 zvals    = 0
@@ -133,6 +161,10 @@ nextslot = 0
 ncross   = 0
 mileage  = 0
 
+! Open the phi=0 crossing file; it is appended to (flushed) at every crossing during the run
+open(newunit=phi0unit, file='poincare_phi0.dat', status='replace', action='write', form='formatted')
+write(phi0unit,'(a)') '# R[m]  Z[m]  T_init[eV]  T_now[eV]  psi_norm_init  psi_norm_now  (markers crossing the phi=0 plane)'
+
 finished = 0
 do while(finished .lt. nprt)
 
@@ -141,16 +173,8 @@ do while(finished .lt. nprt)
    select type (p => sim%groups(1)%particles)
    type is (particle_gc_relativistic)
 
-#ifdef __GFORTRAN__
-      !$omp parallel do default(shared) & !To avoid GNU compiler failure
-#else
       !$omp parallel do default(none) &
-#endif
-#ifdef __GFORTRAN__
-      !$omp shared(sim, tstep, norb, ndata, mileage) & !To avoid GNU compiler failure
-#else
-      !$omp shared(sim, tstep, norb, ndata, mileage, p) &
-#endif
+      !$omp shared(sim, tstep, norb, ndata, mileage) & 
       !$omp shared(raxis, zaxis, ncross, nprt, rvals, zvals, phivals, psivals, milvals, nextslot, pncrid) &
       !$omp private(iprt, ifail, zprev, phiprev, xyz, xyz0) &
       !$omp reduction(+:finished)
@@ -177,16 +201,8 @@ do while(finished .lt. nprt)
       
    type is (particle_fieldline)
       
-#ifdef __GFORTRAN__
-      !$omp parallel do default(shared) & ! To avoid GNU compiler failure
-#else
       !$omp parallel do default(none) &
-#endif
-#ifdef __GFORTRAN__
       !$omp shared(sim, tstep, norb, ndata, mileage) &
-#else
-      !$omp shared(sim, tstep, norb, ndata, mileage, p) & ! To avoid GNU compiler failure
-#endif
       !$omp shared(raxis, zaxis, ncross, nprt, rvals, zvals, phivals, psivals, milvals, nextslot, pncrid) &
       !$omp private(iprt, ifail, zprev, phiprev) &
       !$omp reduction(+:finished)
@@ -210,6 +226,8 @@ do while(finished .lt. nprt)
 
 end do
 
+close(phi0unit)
+
 call cpu_time(t1)
 write(*,*) 'CPU time: ', t1-t0
 
@@ -217,7 +235,7 @@ write(*,*) 'CPU time: ', t1-t0
 call write_poincare_hdf5(fnout, rvals, zvals, phivals, psivals, milvals, pncrid, mileage)
 
 ! Finalize the simulation
-deallocate ( rvals, zvals, phivals, psivals, milvals, pncrid, nextslot, ncross, mileage )
+deallocate ( rvals, zvals, phivals, psivals, milvals, pncrid, nextslot, ncross, mileage, T_init, psi_init )
 call sim%finalize
 
 
@@ -328,6 +346,8 @@ subroutine check_and_store_crossing(fields, iprt, time, mileage, i_elm, st, x, p
   integer*4, intent(inout) :: pncrid(:,:)  !< Stored plane index of a crossing (nprt,ndata)
 
   real*8 :: E(3), B(3), U, psi, psin
+  real*8 :: n_e_loc, T_e_loc !< Electron density and temperature at the current location
+  real*8 :: psin_phi0        !< Normalized psi at the current location (phi=0 crossing)
   integer*4 :: idx !< Helper variable
 
   ! Check whether OMP was crossed and store crossing
@@ -353,6 +373,25 @@ subroutine check_and_store_crossing(fields, iprt, time, mileage, i_elm, st, x, p
 
   ! Check whether the poloidal plane at phi = 0 was crossed and store the crossing
   if (i_elm .gt. 0 .and. floor(phiprev/(2*PI)) .ne. floor(x(3)/(2*PI)) ) then
+     ! Electron temperature at the current (crossing) location
+     call fields%calc_NeTeTi(time, i_elm, st, x(3), n_e_loc, T_e_loc)
+     call get_psi_n0(fields, i_elm, st(1), st(2), x(2), psin_phi0)
+
+     ! Append R, Z, the temperatures and psi_norm of the crossing to the phi=0 file (shared between OpenMP threads)
+     !$omp critical (phi0_file)
+     write(phi0unit,'(6es18.10)') x(1), x(2), T_init(iprt)*K_BOLTZ/EL_CHG, T_e_loc*K_BOLTZ/EL_CHG, &
+          psi_init(iprt), psin_phi0
+     flush(phi0unit)
+
+     ! Keep the same information for the h5 file
+     if (n_phi0 .eq. size(phi0_r)) call grow_phi0()
+     n_phi0 = n_phi0 + 1
+     phi0_id(n_phi0)   = iprt
+     phi0_r(n_phi0)    = x(1)
+     phi0_z(n_phi0)    = x(2)
+     phi0_Tnow(n_phi0) = T_e_loc*K_BOLTZ/EL_CHG
+     !$omp end critical (phi0_file)
+
      nextslot(iprt)     = nextslot(iprt) + 1
      if(nextslot(iprt) .gt. ndata) then
         nextslot(iprt)  = 1
@@ -370,6 +409,34 @@ subroutine check_and_store_crossing(fields, iprt, time, mileage, i_elm, st, x, p
   end if
 
 end subroutine check_and_store_crossing
+
+
+!< Double the capacity of the phi=0 crossing arrays
+subroutine grow_phi0()
+  implicit none
+  integer*4, dimension(:), allocatable :: itmp
+  real*8, dimension(:), allocatable    :: rtmp
+  integer*4 :: n
+
+  n = 2*size(phi0_r)
+
+  allocate( itmp(n) )
+  itmp(1:n_phi0) = phi0_id(1:n_phi0)
+  call move_alloc(itmp, phi0_id)
+
+  allocate( rtmp(n) )
+  rtmp(1:n_phi0) = phi0_r(1:n_phi0)
+  call move_alloc(rtmp, phi0_r)
+
+  allocate( rtmp(n) )
+  rtmp(1:n_phi0) = phi0_z(1:n_phi0)
+  call move_alloc(rtmp, phi0_z)
+
+  allocate( rtmp(n) )
+  rtmp(1:n_phi0) = phi0_Tnow(1:n_phi0)
+  call move_alloc(rtmp, phi0_Tnow)
+
+end subroutine grow_phi0
 
 
 !< Write the Poincare output to a HDF5 file
@@ -399,6 +466,8 @@ subroutine write_poincare_hdf5(fnout, rvals, zvals, phivals, psivals, milvals, p
   real*8, allocatable :: milvals0(:)              !< -,,-
   integer*4, allocatable :: pncrid0(:), iprt(:)   !< Arrays for identifyinf the marker and plane from the 1D data arrays
   integer*4 :: nprt, ndata, npoint, i, j, ipoint  !< Helper variables
+  integer*4 :: k                                  !< Helper variable for the phi=0 data
+  real*8, allocatable :: marker_T0(:)                     !< Initial electron temperature [eV] of each marker
   integer(HID_T) :: file
   integer :: hdferr
 
@@ -451,6 +520,21 @@ subroutine write_poincare_hdf5(fnout, rvals, zvals, phivals, psivals, milvals, p
   call HDF5_array1D_saving_int(file, pncrid0,  npoint, "pncrid")
   call HDF5_array1D_saving_int(file,    iprt,  npoint, "iprt")
   call HDF5_array1D_saving(file, mileage, nprt, "mileage")
+
+  ! Initial values for every marker (index = marker id, 0 if the marker started outside the domain)
+  allocate( marker_T0(nprt) )
+  marker_T0 = T_init*K_BOLTZ/EL_CHG
+  call HDF5_array1D_saving(file, marker_T0,   nprt, "marker_T_init_eV")
+  call HDF5_array1D_saving(file, psi_init,    nprt, "marker_psi_norm_init")
+  deallocate( marker_T0 )
+
+  ! phi=0 crossings: same content as poincare_phi0.dat, joined to the marker values through phi0_iprt
+  if (n_phi0 .gt. 0) then
+     call HDF5_array1D_saving(file, phi0_r(1:n_phi0),        n_phi0, "phi0_R")
+     call HDF5_array1D_saving(file, phi0_z(1:n_phi0),        n_phi0, "phi0_Z")
+     call HDF5_array1D_saving(file, phi0_Tnow(1:n_phi0),     n_phi0, "phi0_T_now_eV")
+     call HDF5_array1D_saving_int(file, phi0_id(1:n_phi0),   n_phi0, "phi0_iprt")
+  end if
 
   deallocate( iprt, pncrid0, rvals0, zvals0, phivals0, psivals0, milvals0 )
 
