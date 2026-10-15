@@ -81,7 +81,7 @@ namelist /in1/  tstep, nstep, tstep_n, nstep_n,                     &
                 D_perp_pri, D_perp_pri_z0, D_perp_pri_width,        &
                 V_pinch_gauss, V_pinch_psin, V_pinch_sig, v_pinch_file, &
                 heatsource_e, heatsource_i, heatsource,             &
-                particlesource, tauIC, Wdia,                        &
+                particlesource, tauIC_file, tauIC, Wdia,            &
                 eta_num, visco_num, visco_par_num,                  &
                 D_perp_num,  D_perp_num_tanh,                       &
                 D_perp_num_tanh_psin, D_perp_num_tanh_sig,          &
