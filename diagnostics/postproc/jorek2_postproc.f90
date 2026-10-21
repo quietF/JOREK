@@ -63,6 +63,7 @@ program jorek2_postproc
   call set_setting('ball_alpha_max',  '6.0',   ierr, 'ballooning: largest alpha in the marginal scan    ')
   call set_setting('ball_s_max',      '3.0',   ierr, 'ballooning: largest shear in s-alpha scans        ')
   call set_setting('ball_nsalpha',    '40',    ierr, 'ballooning: grid points per axis in s-alpha scans ')
+  call set_setting('ball_n_dia',      '20',    ierr, 'ballooning: toroidal n for ion diamagnetic omega* ')
   
   ! --- Print getting started information
   call specific_help('getting_started')

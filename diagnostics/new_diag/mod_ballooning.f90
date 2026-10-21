@@ -44,6 +44,25 @@
 !! diagonal w is symmetrised, and eigenvalues are located with Sturm sequence counts (number of
 !! unstable modes = number of eigenvalues > 0), bisection for lambda_max, inverse iteration for X.
 !!
+!! Ion diamagnetic effects (two-fluid ballooning, Tang, Connor, Hastie, Nucl. Fusion 20, 1439 (1980)):
+!! the inertia rho omega^2 is replaced by rho omega (omega - omega*_pi), with
+!!   omega*_pi = k.(b x grad p_i) / (e n_i B) = n p_i'(psi) / (e n_i)
+!! for k_perp = n grad(alpha) (k.(b x grad psi) = n B exactly in the Clebsch representation), so for
+!! flux functions p_i, n_i omega*_pi is constant along the field line. In JOREK units
+!!   omega*_pi = n m_i P_i' / (e rho sqrt(mu0 rho_0))   ( = 2 n tauIC F0 P_i'/rho, model600 tauIC)
+!! - dia_mode 1: omega*_pi constant on the surface (surface averages of P_i' and rho). With
+!!   lambda the ideal eigenvalue, omega^2 - omega*_pi omega + lambda = 0, i.e. unstable if
+!!   lambda > omega*_pi^2/4 (Sturm count above omega*_pi^2/4), gamma = sqrt(lambda - omega*_pi^2/4).
+!! - dia_mode 2: omega*_pi(theta) from the local normal gradient P_i'(theta) = grad(P_i).grad(psi)/
+!!   |grad psi|^2 and the local rho(theta). Quadratic eigenvalue problem (symmetrised variables)
+!!   (T + omega^2 I - omega D) u = 0, D = diag(omega*_pi(theta)), solved by inverse iteration with
+!!   the Rayleigh functional u^T Q(omega) u = 0 (Q is complex symmetric), started from the ideal
+!!   eigenvector. For real omega*_pi(theta) an ideally stable surface stays stable (the projection
+!!   on the eigenvector gives a real quadratic with real roots), so only ideally unstable cases are
+!!   solved. The tangential (poloidal) gradient of P_i is dropped: it is inconsistent with the
+!!   ballooning ordering (p_i must be a flux function) and would grow secularly along the field line.
+!! In alpha scans P_i' is scaled with P0' (fixed P_i'/P0').
+!!
 !! Mercier and peeling criteria (local, high-n; per surface):
 !! - Mercier, general form of Bauer, Betancourt & Garabedian (1984) as given in Landreman & Jorge,
 !!   J. Plasma Phys. (2020), arXiv:2006.14881, Eqs. (4.16)-(4.20) (= Mercier & Luc 1974, Eq. 37):
@@ -78,13 +97,14 @@ module mod_ballooning
   use data_structure
   use equil_info
   use mod_new_diag
+  use phys_module, only: tauIC_nominal, F0
 
   implicit none
 
   private
-  public :: ball_mercier, ball_salpha_mercier
   public :: t_ball_surface, t_ball_case, ball_surfaces_from_state, ball_evaluate, ball_alpha_crit,  &
-    ball_eigenfunction, ball_salpha_lambda, ball_alpha_to_P0p, ball_cleanup_surface
+    ball_eigenfunction, ball_salpha_lambda, ball_alpha_to_P0p, ball_cleanup_surface,                &
+    ball_mercier, ball_salpha_mercier
 
   character(len=16), parameter :: THIS_MOD_NAME = 'mod_ballooning'
 
@@ -105,6 +125,9 @@ module mod_ballooning
     real*8, allocatable :: theta(:), R(:), Z(:), Jac(:), BB2(:), gpsi2(:), rho(:), D0(:), D1(:), &
       E0(:)
     real*8, allocatable :: I0(:), Ip(:), IF(:) !< Cumulative integrals of nu_psi parts (0..np)
+    real*8, allocatable :: wstar1(:)       !< Local omega*_pi(theta) for n = 1 (JOREK units)
+    real*8  :: wstar1_c = 0.d0             !< Constant omega*_pi for n = 1: surface averages of P_i', rho
+    real*8  :: wstar_var = 0.d0            !< RMS poloidal variation of wstar1 relative to wstar1_c
     real*8  :: D_M = 0.d0                  !< Mercier coefficient (< 1/4 stable)
     real*8  :: peel_term = 0.d0            !< (1/(pi q')) Oint mu0 J_par B/(R^2 B_p^3) dl
     real*8  :: peel_margin = 0.d0          !< sqrt(1 - 4 D_M) - 1 - peel_term (> 0: satisfied)
@@ -124,6 +147,10 @@ module mod_ballooning
     real*8  :: shear_factor = 1.d0         !< Target shear / actual shear for the surface variation
     logical :: drive_only = .false.        !< Scale P0' only in the curvature drive (no change of
                                            !< the local shear; diagnostic, not self-consistent)
+    integer :: dia_mode = 0                !< 0: ideal, 1: constant omega*_pi, 2: omega*_pi(theta)
+    real*8  :: n_dia = 0.d0                !< Toroidal mode number for omega*_pi
+    real*8  :: wstar_an = 0.d0             !< Analytic case: omega*_pi (1 + wstar_eps cos theta)
+    real*8  :: wstar_eps = 0.d0
     integer :: np = 512                    !< Points per 2 pi
     integer :: nturns = 5                  !< theta extends over theta0 +- 2 pi nturns
     integer :: ntheta0 = 1                 !< Number of ballooning angles in [0, 2 pi)
@@ -137,7 +164,7 @@ contains
   subroutine ball_cleanup_surface(surf)
     type(t_ball_surface), intent(inout) :: surf
     if ( allocated(surf%theta) ) deallocate(surf%theta, surf%R, surf%Z, surf%Jac, surf%BB2,         &
-      surf%gpsi2, surf%rho, surf%D0, surf%D1, surf%E0, surf%I0, surf%Ip, surf%IF)
+      surf%gpsi2, surf%rho, surf%D0, surf%D1, surf%E0, surf%I0, surf%Ip, surf%IF, surf%wstar1)
     if ( allocated(surf%m_dlt) ) deallocate(surf%m_dlt, surf%m_jb, surf%m_nHnu, surf%m_kcu,          &
       surf%m_nRu, surf%m_sg, surf%m_F)
     surf%valid = .false.
@@ -168,10 +195,11 @@ contains
     type(t_ball_surface), allocatable, target, intent(out) :: surfs(:)
     integer,                           intent(out) :: ierr
 
-    integer, parameter :: N_EX = 15
+    integer, parameter :: N_EX = 17
     character(len=12), parameter :: names(N_EX) = (/ 'R           ', 'Z           ', 'Psi_N       ', &
       'BR          ', 'BZ          ', 'Btor        ', 'BR_R        ', 'BR_Z        ', 'BZ_R        ', &
-      'BZ_Z        ', 'Btor_R      ', 'Btor_Z      ', 'p_prime_loc ', 'rho         ', 'Jpar        ' /)
+      'BZ_Z        ', 'Btor_R      ', 'Btor_Z      ', 'p_prime_loc ', 'rho         ', 'gradPi_R    ', &
+      'gradPi_Z    ', 'Jpar        ' /)
     type(t_pol_pos_list) :: pol_pos_list
     type(t_tor_pos_list) :: tor_pos_list
     type(t_expr_list)    :: expr_list
@@ -181,11 +209,11 @@ contains
       a0(3), Bv(3), gv(3), Kv(3), axB(3), gxB(3), dq_over_F_dpsi, dphi
     integer :: i, j, jp, jm, iex, n_flip, k, nmaxs
     logical :: rev, rev0
-    real*8  :: ffp(0:np-1)
+    real*8  :: ffp(0:np-1), pip(0:np-1), fac_wstar
     ! --- Mercier / peeling
     real*8  :: dlt(0:np-1), jb(0:np-1), nHnu(0:np-1), kcu(0:np-1), nRu(0:np-1), sgth(0:np-1),     &
       fpt(0:np-1)
-    real*8  :: su, dstar, sF_
+    real*8  :: su, dstar, sF_, jjr
     type(t_ball_surface), pointer :: bs
 
     ierr = 0
@@ -217,13 +245,15 @@ contains
 
     allocate( surfs(nsurf), s0(0:np), sp(0:np), sF(0:np) )
     h = 2.d0 * PI / real(np)
+    ! --- omega*_pi = n m_i P_i' / (e rho sqrt(mu0 rho_0)) = 2 n tauIC_nominal F0 P_i' / rho (JOREK units)
+    fac_wstar = 2.d0 * tauIC_nominal * F0
 
     do i = 1, nsurf
       bs => surfs(i)
       bs%np = np
       allocate( bs%theta(0:np-1), bs%R(0:np-1), bs%Z(0:np-1), bs%Jac(0:np-1), bs%BB2(0:np-1),       &
         bs%gpsi2(0:np-1), bs%rho(0:np-1), bs%D0(0:np-1), bs%D1(0:np-1), bs%E0(0:np-1),              &
-        bs%I0(0:np), bs%Ip(0:np), bs%IF(0:np) )
+        bs%I0(0:np), bs%Ip(0:np), bs%IF(0:np), bs%wstar1(0:np-1) )
 
       bs%valid   = .not. any( pol_pos_list%pos(1:np,i)%outside )
       bs%volume  = pol_pos_list%pos(1,i)%volume
@@ -262,8 +292,11 @@ contains
         psi_RZ = 0.5d0 * ( - R * BZ_Z + BR + R * BR_R )
         ffp(j) = - ( psi_RR - psi_R / R + psi_ZZ ) - R**2 * bs%P0p
         gpsi   = sqrt( psi_R**2 + psi_Z**2 )
+        ! --- Local normal ion pressure gradient and omega*_pi for n = 1
+        pip(j) = ( psi_R * result(1,k,i,15) + psi_Z * result(1,k,i,16) ) / gpsi**2
+        bs%wstar1(j) = fac_wstar * pip(j) / bs%rho(j)
         nR     = psi_R / gpsi
-        nZ     = psi_Z / gpsi
+        nZ     = psi_Z / gpse
         ! --- Mercier / peeling ingredients with the outward flux u = su psi (su = sign(psi_bnd - psi_axis))
         su      = sign(1.d0, eq%psi_bnd - eq%psi_axis)
         dstar   = psi_RR - psi_R / R + psi_ZZ
@@ -275,7 +308,7 @@ contains
         kcu(j)  = su * ( nZ*nZ*psi_RR - 2.d0*nR*nZ*psi_RZ + nR*nR*psi_ZZ ) / gpsi  ! t.H_u.t/|grad u|
         ! --- Direction phi^ x n_u^ = (su nZ, -su nR): sign of B_pol along it = sign of the toroidal current
         sgth(j) = sign(1.d0, BR * su * nZ - BZ * su * nR)
-        bs%jpar_jorek = bs%jpar_jorek + result(1,k,i,15) / real(np)
+        jjr     = result(1,k,i,17)
         ! --- Unit tangent in the direction of increasing theta*
         tR     = - nZ
         tZ     =   nR
@@ -305,6 +338,7 @@ contains
         bs%BB2(j)   = BR**2 + BZ**2 + Bt**2
         bs%Jac(j)   = qabs * R**2 / abs(F)
         dlt(j)      = qabs * R * gpsi / abs(F)          ! dl/dtheta*
+        bs%jpar_jorek = bs%jpar_jorek + jjr / real(np)
 
         ! --- Integrands for nu_psi (d theta*): actual state, P0' variation, FF' variation
         S     = ( nR*F_R + nZ*F_Z ) / F - nR / R - nHn / gpsi + tHt / gpsi
@@ -337,6 +371,10 @@ contains
       bs%FFp     = sum( ffp ) / real(np)
       bs%FFp_var = sqrt( sum( (ffp - bs%FFp)**2 ) / real(np) )                                    &
                  / ( abs(bs%FFp) + sum( bs%R**2 ) / real(np) * abs(bs%P0p) )
+
+      bs%wstar1_c  = fac_wstar * ( sum( pip ) / real(np) ) / ( sum( bs%rho ) / real(np) )
+      bs%wstar_var = sqrt( sum( (bs%wstar1 - bs%wstar1_c)**2 ) / real(np) )                        &
+                   / max( abs(bs%wstar1_c), 1.d-300 )
 
       s0(np) = s0(0);  sp(np) = sp(0);  sF(np) = sF(0)
       bs%I0(0) = 0.d0; bs%Ip(0) = 0.d0; bs%IF(0) = 0.d0
@@ -456,14 +494,15 @@ contains
 
   !> Coefficients g, c, w on the extended grid theta = theta0 + h i, i = -M..M
   !! For a surface, alpha is the target alpha_miller (P0' scaled self-consistently, see header).
-  subroutine build_coefficients(cs, alpha, k0, M, g, c, w, nu_out)
+  subroutine build_coefficients(cs, alpha, k0, M, g, c, w, nu_out, ws)
     type(t_ball_case), intent(in)  :: cs
     real*8,            intent(in)  :: alpha
     integer,           intent(in)  :: k0, M
     real*8,            intent(out) :: g(-M:M), c(-M:M), w(-M:M)
     real*8, optional,  intent(out) :: nu_out(-M:M)
+    real*8, optional,  intent(out) :: ws(-M:M)   !< omega*_pi(theta) for cs%dia_mode (0 if ideal)
 
-    real*8  :: h, th, th0, lam, P0p_t, dP, dFF, C0, Ct, nu, nu0, ga2
+    real*8  :: h, th, th0, lam, P0p_t, dP, dFF, C0, Ct, nu, nu0, ga2, scale
     integer :: i, k, p, turn, np
 
     np = cs%np
@@ -479,6 +518,7 @@ contains
         w(i) = g(i)
         c(i) = alpha * ( cos(th) + lam * sin(th) )
         if ( present(nu_out) ) nu_out(i) = lam
+        if ( present(ws) ) ws(i) = cs%wstar_an * ( 1.d0 + cs%wstar_eps * cos(th) )
       end do
       return
     end if
@@ -486,6 +526,9 @@ contains
     associate( bs => cs%surf )
       P0p_t = ball_alpha_to_P0p(bs, alpha)
       dP    = P0p_t - bs%P0p
+      ! --- P_i' is scaled with P0' (fixed ratio)
+      scale = 0.d0
+      if ( bs%P0p /= 0.d0 ) scale = P0p_t / bs%P0p
       if ( cs%drive_only ) dP = 0.d0        ! P0p_t still enters the drive c below
       C0    = bs%I0(np)
       Ct    = C0 * cs%shear_factor
@@ -501,6 +544,16 @@ contains
         w(i) = bs%Jac(p) * bs%rho(p) * ga2 / bs%BB2(p)
         c(i) = 2.d0 * bs%Jac(p) * ( bs%D0(p) - nu * bs%D1(p) ) * bs%E0(p) * P0p_t / bs%BB2(p)**3
         if ( present(nu_out) ) nu_out(i) = nu
+        if ( present(ws) ) then
+          select case ( cs%dia_mode )
+          case ( 1 )
+            ws(i) = cs%n_dia * scale * bs%wstar1_c
+          case ( 2 )
+            ws(i) = cs%n_dia * scale * bs%wstar1(p)
+          case default
+            ws(i) = 0.d0
+          end select
+        end if
       end do
     end associate
 
@@ -577,48 +630,228 @@ contains
   !> Stability of one case at a given alpha, maximised over the ballooning angles theta0.
   !! n_unst: number of unstable eigenvalues (0 = stable), lam: largest eigenvalue (only computed
   !! if want_lambda), k0_worst: theta0 index of the most unstable angle.
-  subroutine ball_evaluate(cs, alpha, n_unst, lam, k0_worst, want_lambda)
-    type(t_ball_case), intent(in)  :: cs
-    real*8,            intent(in)  :: alpha
-    integer,           intent(out) :: n_unst, k0_worst
-    real*8,            intent(out) :: lam
-    logical,           intent(in)  :: want_lambda
+  !! With cs%dia_mode > 0, n_unst counts the diamagnetically unstable modes (mode 2: 0 or 1), and
+  !! the optional omega returns the most unstable complex frequency (Im omega = gamma >= 0; for
+  !! mode 1 omega = omega*/2 + i sqrt(lambda - omega*^2/4)). lam is always the ideal eigenvalue.
+  subroutine ball_evaluate(cs, alpha, n_unst, lam, k0_worst, want_lambda, omega)
+    type(t_ball_case),    intent(in)  :: cs
+    real*8,               intent(in)  :: alpha
+    integer,              intent(out) :: n_unst, k0_worst
+    real*8,               intent(out) :: lam
+    logical,              intent(in)  :: want_lambda
+    complex*16, optional, intent(out) :: omega
 
-    real*8, allocatable :: g(:), c(:), w(:), d(:), e(:)
-    real*8  :: h, lam_j
-    integer :: M, n, j, k0, nu_j
+    real*8, allocatable :: g(:), c(:), w(:), d(:), e(:), ws(:), u(:)
+    real*8     :: h, lam_j, mu, gam, lam_best
+    complex*16 :: om_j
+    integer    :: M, n, j, k0, nu_j
+    logical    :: need_lam, conv
 
     M = cs%nturns * cs%np
     n = 2*M - 1
     h = 2.d0 * PI / real(cs%np)
-    allocate( g(-M:M), c(-M:M), w(-M:M), d(n), e(n) )
+    allocate( g(-M:M), c(-M:M), w(-M:M), d(n), e(n), ws(-M:M), u(n) )
+    need_lam = want_lambda .or. present(omega) .or. ( cs%dia_mode == 2 )
 
     n_unst   = 0
     lam      = -huge(1.d0)
+    gam      = -1.d0
+    lam_best = -huge(1.d0)
     k0_worst = 0
+    if ( present(omega) ) omega = (0.d0, 0.d0)
     do j = 0, cs%ntheta0 - 1
       k0 = modulo( nint( real(j) * real(cs%np) / real(cs%ntheta0) ), cs%np )
-      call build_coefficients(cs, alpha, k0, M, g, c, w)
+      call build_coefficients(cs, alpha, k0, M, g, c, w, ws=ws)
       call tridiagonal(M, h, g, c, w, d, e)
-
-
-
-      nu_j = count_above(n, d, e, 0.d0)
-      if ( want_lambda ) then
-        lam_j = lambda_max_tri(n, d, e)
-        if ( lam_j > lam ) then
-          lam      = lam_j
+      ! --- Constant omega*: unstable eigenvalues are those above omega*^2/4
+      mu = 0.d0
+      if ( cs%dia_mode == 1 ) mu = 0.25d0 * ws(0)**2
+      nu_j = count_above(n, d, e, mu)
+      lam_j = -huge(1.d0)
+      if ( need_lam ) lam_j = lambda_max_tri(n, d, e)
+      select case ( cs%dia_mode )
+      case ( 1 )
+        om_j = cmplx( 0.5d0 * ws(0), sqrt( max( lam_j - mu, 0.d0 ) ), kind=8 )
+      case ( 2 )
+        ! --- Ideally stable => stable for real omega*(theta). More generally, with u^H Q(omega) u = 0
+        ! --- (a = |u|^2, b = u^H D u, c = u^H T u <= lam a), Im omega /= 0 needs c > b^2/(4a); if
+        ! --- omega* has one sign, |b|/a >= min|omega*|, so lam <= min(omega*^2)/4 is stable.
+        om_j = (0.d0, 0.d0)
+        nu_j = 0
+        if ( (minval(ws) * maxval(ws) > 0.d0) .and. (lam_j <= 0.25d0 * minval(ws**2)) ) then
+          om_j = (0.d0, 0.d0)
+        else if ( lam_j > 0.d0 ) then
+          call ideal_eigenvector(n, d, e, lam_j, u)
+          call quadratic_omega(n, d, e, ws(-M+1:M-1), lam_j, u, om_j, conv)
+          if ( .not. conv ) write(*,'(a,es12.4)') ' WARNING (ballooning): quadratic eigenvalue '    &
+            //'iteration not converged, alpha =', alpha
+          if ( aimag(om_j) > 1.d-6 * sqrt(lam_j) ) nu_j = 1
+        end if
+      case default
+        om_j = cmplx( 0.d0, sqrt( max( lam_j, 0.d0 ) ), kind=8 )
+      end select
+      if ( want_lambda .and. (lam_j > lam) ) lam = lam_j
+      ! --- Most unstable angle: largest growth rate (dia) or largest lambda (ideal)
+      if ( cs%dia_mode > 0 ) then
+        if ( aimag(om_j) > gam ) then
+          gam      = aimag(om_j)
+          k0_worst = k0
+          if ( present(omega) ) omega = om_j
+        end if
+      else if ( need_lam ) then
+        if ( lam_j > lam_best ) then
+          lam_best = lam_j
           k0_worst = k0
         end if
+        if ( present(omega) .and. (aimag(om_j) > aimag(omega)) ) omega = om_j
       else if ( nu_j > n_unst ) then
         k0_worst = k0
       end if
       n_unst = max(n_unst, nu_j)
     end do
 
-    deallocate( g, c, w, d, e )
+    deallocate( g, c, w, d, e, ws, u )
 
   end subroutine ball_evaluate
+
+
+
+  !> Eigenvector u (normalised to max |u| = 1) of the symmetric tridiagonal matrix for its largest
+  !! eigenvalue lam, by inverse iteration with a shift just above lam (T - sigma I negative definite)
+  subroutine ideal_eigenvector(n, d, e, lam, u)
+    integer, intent(in)  :: n
+    real*8,  intent(in)  :: d(n), e(n), lam
+    real*8,  intent(out) :: u(n)
+    real*8  :: piv(n), sigma
+    integer :: k, it
+    sigma = lam + 1.d-8 * max(abs(lam), 1.d-10)
+    u(:) = 1.d0
+    do it = 1, 4
+      piv(1) = d(1) - sigma
+      do k = 2, n
+        piv(k) = d(k) - sigma - e(k-1)**2 / piv(k-1)
+        u(k)   = u(k) - e(k-1) / piv(k-1) * u(k-1)
+      end do
+      u(n) = u(n) / piv(n)
+      do k = n-1, 1, -1
+        u(k) = ( u(k) - e(k) * u(k+1) ) / piv(k)
+      end do
+      u = u / maxval(abs(u))
+    end do
+  end subroutine ideal_eigenvector
+
+
+
+  !> Most unstable root of (T + omega^2 I - omega D) u = 0 (T symmetric tridiagonal (d, e),
+  !! D = diag(ws)), by inverse iteration with the Rayleigh functional u^T Q(omega) u = 0, started
+  !! from the ideal eigenpair (lam, u0). Returns omega with Im omega >= 0.
+  subroutine quadratic_omega(n, d, e, ws, lam, u0, omega, converged)
+    integer,    intent(in)  :: n
+    real*8,     intent(in)  :: d(n), e(n), ws(n), lam, u0(n)
+    complex*16, intent(out) :: omega
+    logical,    intent(out) :: converged
+
+    complex*16 :: u(n), qd(n), qdl(n), qdu(n), a, b, c, disc, r1, r2, om_new
+    real*8     :: dom, scale
+    integer    :: it, k
+
+    u = cmplx(u0, 0.d0, kind=8)
+    call rayleigh(u, a, b, c)
+    disc  = sqrt( b**2 - 4.d0 * a * c )
+    r1    = ( b + disc ) / ( 2.d0 * a )
+    r2    = ( b - disc ) / ( 2.d0 * a )
+    omega = r1
+    if ( aimag(r2) > aimag(r1) ) omega = r2
+    converged = .false.
+    scale     = max(abs(omega), sqrt(abs(lam)), 1.d-300)
+    dom       = huge(1.d0)
+    do it = 1, 300
+      ! --- Inverse iteration step at the current omega
+      do k = 1, n
+        qd(k) = d(k) + omega**2 - omega * ws(k)
+      end do
+      qdl(1:n-1) = cmplx(e(1:n-1), 0.d0, kind=8)
+      qdu(1:n-1) = qdl(1:n-1)
+      call tridiag_solve_c(n, qdl, qd, qdu, u)
+      u = u / maxval(abs(u))
+      call rayleigh(u, a, b, c)
+      disc = sqrt( b**2 - 4.d0 * a * c )
+      r1   = ( b + disc ) / ( 2.d0 * a )
+      r2   = ( b - disc ) / ( 2.d0 * a )
+      ! --- Roots come in complex-conjugate pairs: follow the most unstable one; if both roots are
+      ! --- (nearly) real, follow the one closest to the previous omega
+      if ( max(abs(aimag(r1)), abs(aimag(r2))) > 1.d-10 * scale ) then
+        om_new = r1
+        if ( aimag(r2) > aimag(r1) ) om_new = r2
+      else
+        om_new = r1
+        if ( abs(r2 - omega) < abs(r1 - omega) ) om_new = r2
+      end if
+      dom = abs(om_new - omega)
+      omega = om_new
+      if ( dom <= 1.d-12 * scale ) then
+        converged = .true.
+        exit
+      end if
+    end do
+    ! --- Slow (linear) convergence next to the marginal point, where the two roots of the projected
+    ! --- quadratic coalesce; a final step below 1e-7 is accurate enough for the stability verdict
+    if ( dom <= 1.d-7 * scale ) converged = .true.
+    if ( aimag(omega) < 0.d0 ) omega = conjg(omega)
+
+  contains
+
+    !> Coefficients of u^T Q(omega) u = a omega^2 - b omega + c (transpose, not conjugate)
+    subroutine rayleigh(v, a, b, c)
+      complex*16, intent(in)  :: v(n)
+      complex*16, intent(out) :: a, b, c
+      a = sum( v**2 )
+      b = sum( ws * v**2 )
+      c = sum( d * v**2 ) + 2.d0 * sum( e(1:n-1) * v(1:n-1) * v(2:n) )
+    end subroutine rayleigh
+
+  end subroutine quadratic_omega
+
+
+
+  !> Solve a complex tridiagonal system (sub-diagonal dl, diagonal dd, super-diagonal du) with
+  !! partial pivoting (algorithm of LAPACK zgtsv); the solution overwrites b. dl, dd, du are destroyed.
+  subroutine tridiag_solve_c(n, dl, dd, du, b)
+    integer,    intent(in)    :: n
+    complex*16, intent(inout) :: dl(n), dd(n), du(n), b(n)
+    complex*16 :: fact, temp
+    integer    :: i
+    do i = 1, n-1
+      if ( abs(dd(i)) >= abs(dl(i)) ) then
+        if ( dd(i) == (0.d0, 0.d0) ) dd(i) = (1.d-300, 0.d0)
+        fact    = dl(i) / dd(i)
+        dd(i+1) = dd(i+1) - fact * du(i)
+        b(i+1)  = b(i+1) - fact * b(i)
+        dl(i)   = (0.d0, 0.d0)
+      else
+        fact    = dd(i) / dl(i)
+        dd(i)   = dl(i)
+        temp    = dd(i+1)
+        dd(i+1) = du(i) - fact * temp
+        if ( i < n-1 ) then
+          dl(i)   = du(i+1)                ! second super-diagonal of row i
+          du(i+1) = - fact * dl(i)
+        else
+          dl(i)   = (0.d0, 0.d0)
+        end if
+        du(i)   = temp
+        temp    = b(i)
+        b(i)    = b(i+1)
+        b(i+1)  = temp - fact * b(i+1)
+      end if
+    end do
+    if ( dd(n) == (0.d0, 0.d0) ) dd(n) = (1.d-300, 0.d0)
+    b(n) = b(n) / dd(n)
+    if ( n > 1 ) b(n-1) = ( b(n-1) - du(n-1) * b(n) ) / dd(n-1)
+    do i = n-2, 1, -1
+      b(i) = ( b(i) - du(i) * b(i+1) - dl(i) * b(i+2) ) / dd(i)
+    end do
+  end subroutine tridiag_solve_c
 
 
 
@@ -695,34 +928,19 @@ contains
     real*8,              intent(out) :: lam
     real*8, allocatable, intent(out) :: theta(:), X(:), g(:), c(:), w(:), nu(:)
 
-    real*8, allocatable :: d(:), e(:), u(:), piv(:)
-    real*8  :: h, sigma
-    integer :: M, n, i, k, it
+    real*8, allocatable :: d(:), e(:), u(:)
+    real*8  :: h
+    integer :: M, n, i
 
     M = cs%nturns * cs%np
     n = 2*M - 1
     h = 2.d0 * PI / real(cs%np)
-    allocate( theta(-M:M), X(-M:M), g(-M:M), c(-M:M), w(-M:M), nu(-M:M), d(n), e(n), u(n), piv(n) )
+    allocate( theta(-M:M), X(-M:M), g(-M:M), c(-M:M), w(-M:M), nu(-M:M), d(n), e(n), u(n) )
 
     call build_coefficients(cs, alpha, k0, M, g, c, w, nu)
     call tridiagonal(M, h, g, c, w, d, e)
     lam   = lambda_max_tri(n, d, e)
-    sigma = lam + 1.d-8 * max(abs(lam), 1.d-10)  ! T - sigma I is negative definite
-
-    u(:) = 1.d0
-    do it = 1, 4
-      ! --- Solve (T - sigma I) u_new = u (LDL^T without pivoting is stable here)
-      piv(1) = d(1) - sigma
-      do k = 2, n
-        piv(k) = d(k) - sigma - e(k-1)**2 / piv(k-1)
-        u(k)   = u(k) - e(k-1) / piv(k-1) * u(k-1)
-      end do
-      u(n) = u(n) / piv(n)
-      do k = n-1, 1, -1
-        u(k) = ( u(k) - e(k) * u(k+1) ) / piv(k)
-      end do
-      u = u / maxval(abs(u))
-    end do
+    call ideal_eigenvector(n, d, e, lam, u)
 
     do i = -M, M
       theta(i) = h * real(k0 + i)
@@ -735,7 +953,7 @@ contains
     X = X / maxval(abs(X))
     if ( X(0) < 0.d0 ) X = -X
 
-    deallocate( d, e, u, piv )
+    deallocate( d, e, u )
 
   end subroutine ball_eigenfunction
 

@@ -2413,9 +2413,10 @@ module exec_commands
     type(t_ball_case)   :: cs
     character(len=1024) :: filename, status, access
     character(len=32)   :: cmd
-    integer :: nsurf, nsmall, nmaxstep, n_unst, k0, i_file, i, is, ia, nsa
+    integer :: nsurf, nsmall, nmaxstep, n_unst, k0, i_file, i, is, ia, nsa, n_dia, imd, nud, k0d
     real*8  :: psin_min, psin_max, alpha_max, s_max, deltaphi, psin, lam, a1, a2, shear, shear_fd, &
-      dpsin, f1, f2, an, a2n, fn, lam_c, dm_sa, pm_sa
+      dpsin, f1, f2, an, a2n, fn, lam_c, dm_sa, pm_sa, ad(2), fd(2), gd(2), wsc
+    complex*16 :: om
     real*8, allocatable :: theta(:), X(:), g(:), c(:), w(:), nu(:)
 
     ierr = 0
@@ -2427,6 +2428,7 @@ module exec_commands
     alpha_max  = get_float_setting('ball_alpha_max', ierr)
     s_max      = get_float_setting('ball_s_max', ierr)
     nsa        = get_int_setting('ball_nsalpha', ierr)
+    n_dia      = get_int_setting('ball_n_dia', ierr)
 
     ! --- s-alpha benchmark (Forest, Classic Problems in MHD, lecture 26, Eq. 26.86)
     if ( cmd == 'ballooning_benchmark' ) then
@@ -2436,6 +2438,22 @@ module exec_commands
       call ball_evaluate(cs, 1.2d0, n_unst, lam, k0, .true.)
       write(*,'(a,f10.6,a)') ' s-alpha benchmark s=0.6, alpha=1.2: lambda_max =', lam,               &
         '   (lecture 26: 0.231)'
+      ! --- Ion diamagnetic tests: omega*(theta) = 0.4 (1 + eps cos theta)
+      lam_c = lam
+      cs%wstar_an = 0.4d0
+      cs%dia_mode = 1
+      call ball_evaluate(cs, 1.2d0, n_unst, lam, k0, .true., om)
+      write(*,'(a,2f12.8,a,f12.8)') ' omega* = 0.4 constant, closed form:   omega =', om,               &
+        '   check sqrt(lambda - 0.04) =', sqrt(lam_c - 0.04d0)
+      cs%dia_mode = 2
+      call ball_evaluate(cs, 1.2d0, n_unst, lam, k0, .true., om)
+      write(*,'(a,2f12.8)')        ' omega* = 0.4 constant, quadratic EVP: omega =', om
+      cs%wstar_eps = 0.5d0
+      call ball_evaluate(cs, 1.2d0, n_unst, lam, k0, .true., om)
+      write(*,'(a,2f12.8)')        ' omega* = 0.4 (1 + 0.5 cos theta), quadratic EVP: omega =', om
+      cs%dia_mode  = 0
+      cs%wstar_an  = 0.d0
+      cs%wstar_eps = 0.d0
       write(filename,'(2a)') trim(DIR), 'ballooning_salpha_benchmark.dat'
       open(newunit=i_file, file=trim(filename), status='replace', action='write')
       write(i_file,'(a,f10.6)') '# s-alpha model, lambda_max(s=0.6, alpha=1.2) = ', lam
@@ -2489,6 +2507,10 @@ module exec_commands
         //'reach marginal stability; -1 if alpha_crit = -1'
       write(i_file,'(a)') '# alpha_crit_1/2, f_marg_1/2: self-consistent scan (local shear follows dp/dpsi);'&
         //' alpha_crit_naive, f_marg_naive: naive scan (only the curvature drive is scaled)'
+      write(i_file,'(a,i5,a,es14.6,a)') '# ion diamagnetic: omega*_pi for ball_n_dia =', n_dia,       &
+        ' (JOREK units, time unit sqrt(mu0 rho0) =', sqrt_mu0_rho0, ' s); gamma_dia/alpha_crit_dia: '&
+        //'omega*_pi '                                                                                 &
+        //'constant on the surface; *_var: omega*_pi(theta) (quadratic eigenvalue problem)'
       write(i_file,'(a)') '# rel_var_dP0, rel_var_FFp: poloidal variation of dP0/dpsi and of FF'''  &
         //' = -Delta*psi - R^2 dP0/dpsi on the surface (0 for a Grad-Shafranov equilibrium)'
       write(i_file,'(a)') '# D_Mercier: Mercier coefficient (< 1/4 stable); peel_margin = sqrt(1-4 D_M) - 1 '&
@@ -2498,7 +2520,9 @@ module exec_commands
       write(i_file,'(a)') '#      Psi_N              q          shear       shear_fd   alpha_miller'  &
         //'       dP0_dpsi    rel_var_dP0    rel_var_FFp         lambda         theta0 n_unst'     &
         //'   alpha_crit_1   alpha_crit_2       f_marg_1       f_marg_2 alpha_crit_naive   f_marg_naive'&
-        //'      D_Mercier    peel_margin      peel_term       jpar_rec     jpar_jorek'
+        //'      D_Mercier    peel_margin      peel_term       jpar_rec     jpar_jorek'          &
+        //'     omega_star rel_var_wstar      gamma_dia  gamma_dia_var alpha_crit_dia     f_marg_dia'  &
+        //' alpha_crit_dia_var f_marg_dia_var'
       do i = 1, nsurf
         if ( .not. surfs(i)%valid ) cycle
         cs%surf => surfs(i)
@@ -2508,6 +2532,18 @@ module exec_commands
         cs%drive_only = .true.
         call ball_alpha_crit(cs, alpha_max, nint(alpha_max*20.d0), an, a2n)
         cs%drive_only = .false.
+        ! --- Ion diamagnetic stabilisation: constant omega*_pi (1) and omega*_pi(theta) (2)
+        cs%n_dia = real(n_dia)
+        do imd = 1, 2
+          cs%dia_mode = imd
+          call ball_evaluate(cs, surfs(i)%alpha0, nud, lam_c, k0d, .false., om)
+          gd(imd) = aimag(om)
+          call ball_alpha_crit(cs, alpha_max, nint(alpha_max*20.d0), ad(imd), a2n)
+          fd(imd) = -1.d0
+          if ( (ad(imd) > 0.d0) .and. (surfs(i)%alpha0 > 0.d0) ) fd(imd) = ad(imd) / surfs(i)%alpha0
+        end do
+        cs%dia_mode = 0
+        wsc = real(n_dia) * surfs(i)%wstar1_c
         shear    = 2.d0 * surfs(i)%volume * surfs(i)%dq_dpsi    / surfs(i)%q / surfs(i)%dV_dpsi
         shear_fd = 2.d0 * surfs(i)%volume * surfs(i)%dq_dpsi_fd / surfs(i)%q / surfs(i)%dV_dpsi
         f1 = -1.d0
@@ -2516,11 +2552,11 @@ module exec_commands
         if ( (a2 > 0.d0) .and. (surfs(i)%alpha0 > 0.d0) ) f2 = a2 / surfs(i)%alpha0
         fn = -1.d0
         if ( (an > 0.d0) .and. (surfs(i)%alpha0 > 0.d0) ) fn = an / surfs(i)%alpha0
-        write(i_file,'(10es15.6,i7,11es15.6)') surfs(i)%psin, abs(surfs(i)%q), shear, shear_fd,   &
+        write(i_file,'(10es15.6,i7,19es15.6)') surfs(i)%psin, abs(surfs(i)%q), shear, shear_fd,   &
           surfs(i)%alpha0, surfs(i)%P0p, surfs(i)%P0p_var / max(abs(surfs(i)%P0p), 1.d-300),       &
           surfs(i)%FFp_var, lam, 2.d0 * PI * real(k0) / real(cs%np), n_unst, a1, a2, f1, f2, an, fn,&
           surfs(i)%D_M, surfs(i)%peel_margin, surfs(i)%peel_term, surfs(i)%jpar_rec,              &
-          surfs(i)%jpar_jorek
+          surfs(i)%jpar_jorek, wsc, surfs(i)%wstar_var, gd(1), gd(2), ad(1), fd(1), ad(2), fd(2)
       end do
       close(i_file)
 
