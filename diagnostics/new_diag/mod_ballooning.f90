@@ -296,7 +296,7 @@ contains
         pip(j) = ( psi_R * result(1,k,i,15) + psi_Z * result(1,k,i,16) ) / gpsi**2
         bs%wstar1(j) = fac_wstar * pip(j) / bs%rho(j)
         nR     = psi_R / gpsi
-        nZ     = psi_Z / gpse
+        nZ     = psi_Z / gpsi
         ! --- Mercier / peeling ingredients with the outward flux u = su psi (su = sign(psi_bnd - psi_axis))
         su      = sign(1.d0, eq%psi_bnd - eq%psi_axis)
         dstar   = psi_RR - psi_R / R + psi_ZZ
